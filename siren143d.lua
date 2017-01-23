@@ -1,6 +1,11 @@
 do
+    -- May need to install this via your distro's package manager
     local bit = require("bit")
     
+    local HEADER_LEN = 16
+    local POSITION_LEN = 12
+    local AUDIO_LEN = 80
+
     local FLAG_FIELDS = {
         FlagAudioOnly = {"Audio Only", 0x1},
         FlagSpeakerPosition = {"Speaker Position", 0x2},
@@ -11,12 +16,16 @@ do
         FlagEncapsulatedMedia = {"Encapsulated Media", 0x80},
         FlagMediaControl = {"Media Control", 0x100}
     }
-    
+
+    local PARTICIPANT_ADDED = 3
+    local PARTICIPANT_UPDATED = 2
+    local PARTICIPANT_REMOVED = 1
+
     -- Maybe? IDK lol.
     local PARTICIPANT_UPDATE_TYPES = {
-        [3] = "Added",
-        [2] = "Updated",
-        [1] = "Removed"
+        [PARTICIPANT_ADDED] = "Added",
+        [PARTICIPANT_UPDATED] = "Updated",
+        [PARTICIPANT_REMOVED] = "Removed"
     }
 
     local siren14_3d = Proto("siren14_3d", "RTP / SIREN14-3D")
@@ -76,13 +85,14 @@ do
         local unknown_num_width = 0
         
         local offset = 41
-        if update_type == 3 then
+        if update_type == PARTICIPANT_ADDED then
             local display_name_len = buf(41, 2):uint()
             participant:add(F.ParticipantDisplayName, buf(43, display_name_len))
             participant:set_text(buf(43, display_name_len):string())
             offset = offset + 2 + display_name_len
             unknown_num_width = 1
         else
+            -- Vivox username only, fixed length.
             participant:set_text(buf(16, 25):string())
             -- seems this might be ParticipantUnknown2 actually is?
             unknown_num_width = 2
@@ -92,7 +102,7 @@ do
         participant:add(F.ParticipantUnknownNumStr, buf(offset + unknown_num_width, unknown_num_len))
         offset = offset + unknown_num_width + unknown_num_len
         
-        if update_type == 3 then
+        if update_type == PARTICIPANT_ADDED then
             participant:add(F.ParticipantUnknown4, buf(offset, 4))
         end
     end
@@ -161,26 +171,26 @@ do
         dissect_flag_attr(flags_tree, "FlagEncapsulatedMedia", flags)
         dissect_flag_attr(flags_tree, "FlagMediaControl", flags)
         
-        local payload_offset = 16
+        local payload_offset = HEADER_LEN
         
         -- If any this is any of the "position" packets then the audio
         -- data will follow after 12 bytes of positional data.
         if bit.band(flags_int, 0x16) > 0 then
-            payload_offset = 28
-            local pos_buf = tvb(16, 12)
+            payload_offset = payload_offset + POSITION_LEN
+            local pos_buf = tvb(HEADER_LEN, POSITION_LEN)
             local pos_tree = subtree:add(F.Position, pos_buf)
             dissect_3d_vector(pos_tree, "Position", pos_buf)
         end
         
         local frame_len = 0
         if bit.band(flags_int, FLAG_FIELDS["FlagRosterUpdate"][2]) > 0 then
-            dissect_participants(subtree:add(F.Participants), tvb(payload_offset, -1))
+            dissect_participants(subtree:add(F.Participants), tvb(payload_offset))
             -- Roster updates always appear to be on the end and don't have an
             -- obvious terminator. Assume we consumed the entire buffer.
             frame_len = tvb:len()
         else
-            subtree:add(F.AudioData, tvb(payload_offset, 80))
-            frame_len = payload_offset + 80
+            subtree:add(F.AudioData, tvb(payload_offset, AUDIO_LEN))
+            frame_len = payload_offset + AUDIO_LEN
         end
         subtree:set_len(frame_len)
         return frame_len
@@ -190,7 +200,7 @@ do
         pinfo.cols.protocol = "RTP / SIREN14-3D"
         local offset = 0
         while offset < tvb:len() do
-            offset = offset + dissect_siren14_3d_frame(tree, tvb(offset, -1))
+            offset = offset + dissect_siren14_3d_frame(tree, tvb(offset))
         end
     end
 
